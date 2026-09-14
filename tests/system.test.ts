@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import request from 'supertest';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFDict, PDFRawStream, decodePDFRawStream } from 'pdf-lib';
+import sharp from 'sharp';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 async function pdfText(file: string) { const task = getDocument({ data: new Uint8Array(await readFile(file)) }); const doc = await task.promise; const text: string[] = []; for (let i=1;i<=doc.numPages;i++) { const content = await (await doc.getPage(i)).getTextContent(); text.push(content.items.filter(i => 'str' in i).map(i => i.str).join(' ')); } await task.destroy(); return text; }
 import { createFixtures } from '../scripts/fixtures.ts';
@@ -57,6 +58,8 @@ test('quote price is server-derived, immutable and reusable for order idempotenc
   const q = await guest.post('/api/quotes').send({ fileIds: [fileId], copies: 2, duplex: true, name: '陈同学', amount: 1 }).expect(200); assert.equal(q.body.amount, 120);
   await admin.put('/api/admin/settings').send({ ...settings(), duplexPrice: 35 }).expect(200);
   const created = await guest.post('/api/orders').send({ quoteId: q.body.id }).expect(201); orderId = created.body.id;
+  assert.equal(created.body.paid, 1); assert.equal(created.body.status, 'generating');
+  assert.equal(db.prepare('SELECT count(*) AS n FROM payments WHERE order_id=?').get(orderId)!.n, 1);
   assert.equal(created.body.snapshot.amount, 120); assert.equal(created.body.snapshot.unitPrice, 20);
   const again = await guest.post('/api/orders').send({ quoteId: q.body.id }).expect(200); assert.equal(again.body.id, orderId);
   await other.get(`/api/orders/${orderId}`).expect(404);
@@ -83,9 +86,14 @@ test('merchant metrics, order search, cover and store settings persist', async (
 test('paused device rejects upload, quotes and unpaid checkout; cancellation prevents payment', async () => {
   const q = await guest.post('/api/quotes').send({ fileIds: [fileId], copies: 1, duplex: false, name: '' }).expect(200);
   const o = await guest.post('/api/orders').send({ quoteId: q.body.id }).expect(201);
+  // Simulate an unpaid order retained from the previous release.
+  db.prepare('DELETE FROM payments WHERE order_id=?').run(o.body.id);
+  db.prepare("UPDATE orders SET status='awaiting_payment',paid=0 WHERE id=?").run(o.body.id);
+  const pendingQuote = await guest.post('/api/quotes').send({ fileIds: [fileId], copies: 1, duplex: false }).expect(200);
   await admin.put('/api/admin/settings').send({ ...settings(), accepting: false }).expect(200);
   await guest.post('/api/files').attach('file', 'examples/sample-photo.png').expect(409);
   await guest.post('/api/quotes').send({ fileIds: [fileId], copies: 1, duplex: false }).expect(409);
+  await guest.post('/api/orders').send({ quoteId: pendingQuote.body.id }).expect(409);
   await guest.post(`/api/orders/${o.body.id}/pay`).expect(409);
   await guest.post(`/api/orders/${o.body.id}/cancel`).expect(200);
   await admin.put('/api/admin/settings').send({ ...settings(), accepting: true }).expect(200);
@@ -132,4 +140,47 @@ test('expiration removes physical files and blocks download and retry, retaining
   await assert.rejects(readFile(filePath(uploaded.body.id, 'original', 'png'))); await assert.rejects(readFile(filePath(o.body.id, 'output')));
   await guest.get(`/api/orders/${o.body.id}/pdf`).expect(410); await admin.post(`/api/admin/orders/${o.body.id}/retry`).expect(409);
   assert.equal((await guest.get(`/api/orders/${o.body.id}`)).body.status, 'expired');
+});
+
+test('multiple images merge in the selected order with automatic mock payment and private thumbnails', async () => {
+  const colors: [number, number, number][] = [[230, 40, 30], [25, 160, 60], [40, 70, 220]];
+  const ids: string[] = [];
+  for (const [i, color] of colors.entries()) {
+    const bytes = await sharp({ create: { width: 80, height: 100, channels: 3, background: { r: color[0], g: color[1], b: color[2] } } }).png().toBuffer();
+    const res = await guest.post('/api/files').attach('file', bytes, `image-${i + 1}.png`).expect(201);
+    ids.push(res.body.id); await tick();
+  }
+  const thumb = await guest.get(`/api/files/${ids[0]}/thumbnail`).expect(200).expect('Content-Type', /image\/png/);
+  assert.ok((await sharp(thumb.body).metadata()).width! <= 160);
+  await other.get(`/api/files/${ids[0]}/thumbnail`).expect(404);
+  await guest.get(`/api/files/${fileId}/thumbnail`).expect(400);
+  const order = [ids[2], ids[0], ids[1]];
+  const quote = await guest.post('/api/quotes').send({ fileIds: order, copies: 1, duplex: false }).expect(200);
+  const created = await guest.post('/api/orders').send({ quoteId: quote.body.id }).expect(201);
+  assert.equal(created.body.paid, 1); assert.equal(created.body.status, 'generating');
+  assert.deepEqual(created.body.snapshot.fileIds, order);
+  const again = await guest.post('/api/orders').send({ quoteId: quote.body.id }).expect(200);
+  assert.equal(again.body.id, created.body.id);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM payments WHERE order_id=?').get(created.body.id)!.n, 1);
+  // No /pay call: creating the order must be sufficient to produce the final PDF.
+  await tick();
+  const output = await PDFDocument.load(await readFile(filePath(created.body.id, 'output')));
+  assert.equal(output.getPageCount(), 4);
+  function pixels(resources: PDFDict): Uint8Array | undefined {
+    const objects = resources.lookup(PDFName.of('XObject'), PDFDict);
+    for (const key of objects.keys()) {
+      const stream = objects.lookup(key);
+      if (!(stream instanceof PDFRawStream)) continue;
+      if (stream.dict.get(PDFName.of('Subtype')) === PDFName.of('Image')) return decodePDFRawStream(stream).decode();
+      const nested = stream.dict.lookupMaybe(PDFName.of('Resources'), PDFDict);
+      if (nested) { const result = pixels(nested); if (result) return result; }
+    }
+  }
+  for (const [i, expected] of [colors[2], colors[0], colors[1]].entries()) {
+    const data = pixels(output.getPage(i + 1).node.Resources()!);
+    assert.ok(data, 'Each image must be present in its output page');
+    assert.deepEqual(Array.from(data.slice(0, 3)), expected, `Image page ${i + 1} follows the selected order`);
+  }
+  db.prepare('UPDATE files SET expires=1 WHERE id=?').run(ids[0]);
+  await guest.get(`/api/files/${ids[0]}/thumbnail`).expect(410);
 });

@@ -7,6 +7,7 @@ import { rename, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import QRCode from 'qrcode';
+import sharp from 'sharp';
 import { ZodError, z } from 'zod';
 import { config, filePath, sofficePath } from './config.ts';
 import { db, settings, transaction, event, checkPassword, hashPassword } from './db.ts';
@@ -65,6 +66,13 @@ export function createApp() {
     } finally { await rm(temp, { force: true }); }
   });
   app.get('/api/files/:id/pdf', (req, res) => { const f = ownedFile(req, String(req.params.id)); if (f.status !== 'ready' || f.expires <= Date.now()) throw new AppError(410, '文件尚未就绪或已经过期。'); res.type('pdf').sendFile(filePath(f.id, 'converted')); });
+  app.get('/api/files/:id/thumbnail', async (req, res) => {
+    const f = ownedFile(req, String(req.params.id));
+    if (f.status !== 'ready' || f.expires <= Date.now()) throw new AppError(410, '图片尚未就绪或已经过期。');
+    if (!['png', 'jpg', 'jpeg'].includes(f.ext)) throw new AppError(400, '此文件不是图片。');
+    const image = await sharp(filePath(f.id, 'original', f.ext), { limitInputPixels: 40_000_000 }).rotate().resize({ width: 160, height: 160, fit: 'inside', withoutEnlargement: true }).png().toBuffer();
+    res.type('png').send(image);
+  });
   app.post('/api/files/:id/retry', (req, res) => { const f = ownedFile(req, String(req.params.id)); if (f.status !== 'failed' || f.expires <= Date.now()) throw new AppError(409, '仅可重试未过期的失败文件。'); db.prepare("UPDATE files SET status='queued',error=NULL WHERE id=?").run(f.id); res.json({ ok: true }); });
   app.delete('/api/files/:id', async (req, res) => {
     const f = ownedFile(req, String(req.params.id));
@@ -93,9 +101,11 @@ export function createApp() {
     const id = randomUUID(), now = Date.now(), expires = now + snap.settings.retentionHours * 3600_000;
     let code: string; do { code = String(randomInt(100000, 1000000)); } while (db.prepare('SELECT id FROM orders WHERE code=?').get(code));
     transaction(() => {
-      db.prepare('INSERT INTO orders(id,owner,code,quote_id,snapshot,status,created,expires) VALUES(?,?,?,?,?,?,?,?)').run(id, auth(req).guest, code, quoteId, q.snapshot, 'awaiting_payment', now, expires);
+      db.prepare('INSERT INTO orders(id,owner,code,quote_id,snapshot,status,paid,created,expires) VALUES(?,?,?,?,?,?,?,?,?)').run(id, auth(req).guest, code, quoteId, q.snapshot, 'generating', 1, now, expires);
+      db.prepare('INSERT INTO payments VALUES(?,?,?,?)').run(id, mockPayment.confirm(id).reference, snap.amount, now);
       for (const fid of snap.fileIds) db.prepare('UPDATE files SET expires=max(expires,?) WHERE id=?').run(expires, fid);
       event(id, '创建测试订单');
+      event(id, '自动模拟支付成功（未扣款）');
     });
     res.status(201).json(presentOrder(getOrder(id)!));
   });
