@@ -1,0 +1,11 @@
+import 'dotenv/config';
+import { DatabaseSync, backup } from 'node:sqlite';
+import { mkdirSync, cpSync, existsSync } from 'node:fs';
+import path from 'node:path';
+const source = path.resolve(process.env.DATA_DIR || 'data');
+const destination = path.resolve('backups', new Date().toISOString().replaceAll(':','-').replaceAll('.','-'));
+mkdirSync(destination, { recursive: true });
+const db = new DatabaseSync(path.join(source, 'print.sqlite'), { readOnly: true });
+await backup(db, path.join(destination, 'print.sqlite')); db.close();
+for (const dir of ['original','converted','output']) if (existsSync(path.join(source, dir))) cpSync(path.join(source, dir), path.join(destination, dir), { recursive: true });
+console.log(`备份已保存至 ${destination}。文件一致性备份请先暂停接单并停止服务。`);

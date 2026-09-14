@@ -1,0 +1,12 @@
+import 'dotenv/config';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
+const all = Object.entries(os.networkInterfaces()).flatMap(([name, items]) => (items || []).map(i => ({ name, ...i }))).filter(i => i.family === 'IPv4' && !i.internal && /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(i.address));
+all.sort((a,b) => Number(/virtual|vmware|vbox|wsl|docker|loopback/i.test(a.name)) - Number(/virtual|vmware|vbox|wsl|docker|loopback/i.test(b.name)));
+const ip = process.argv[2] || all[0]?.address;
+if (!ip || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) throw new Error('未找到局域网地址，可运行 npm run lan -- 192.168.x.x 指定本机地址。');
+const port = process.env.PORT || '8787';
+console.log(`手机和电脑连接同一网络后访问 http://${ip}:${port}`);
+console.log(`商家后台 http://${ip}:${port}/merchant（仅在可信局域网使用）`);
+const child = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], { stdio: 'inherit', env: { ...process.env, HOST: '0.0.0.0', PUBLIC_BASE_URL: `http://${ip}:${port}` } });
+child.on('exit', code => process.exit(code || 0));
