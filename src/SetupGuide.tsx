@@ -6,7 +6,7 @@ import type { PrinterState } from '../server/printers';
 type SetupState = { wordReady: boolean; fontReady: boolean; printer: PrinterState; accepting: boolean; url: string };
 
 export function SetupPrompt() {
-  return <section className="setup-prompt"><BookOpen size={23}/><div><strong>第一次使用？先完成安装与设置</strong><p>从准备电脑、连接打印机到顾客扫码，按步骤检查就能找到还缺什么。</p></div><Link className="secondary" to="/merchant/setup">查看设置引导 <ArrowRight size={16}/></Link></section>;
+  return <section className="setup-prompt"><BookOpen size={23}/><div><strong>安装帮助与设备维护</strong><p>查看安装说明、检查运行状态，或调整打印机和店铺设置。</p></div><Link className="secondary" to="/merchant/setup">查看设置指南 <ArrowRight size={16}/></Link></section>;
 }
 
 export function SetupGuide() {

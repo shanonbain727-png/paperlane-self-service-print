@@ -10,7 +10,7 @@ import QRCode from 'qrcode';
 import sharp from 'sharp';
 import { ZodError, z } from 'zod';
 import { config, filePath, sofficePath } from './config.ts';
-import { db, settings, transaction, event, checkPassword, hashPassword } from './db.ts';
+import { db, settings, onboarding, transaction, event, checkPassword, hashPassword } from './db.ts';
 import { makeSnapshot, optionsSchema, settingsSchema, AppError } from './domain.ts';
 import { mockPayment } from './pdf.ts';
 import type { FileRow, OrderRow, Snapshot } from './types.ts';
@@ -28,6 +28,12 @@ function ownedOrder(req: Request, id: string) { const o = getOrder(id); if (!o |
 function session(role: string) { const id = randomBytes(32).toString('hex'); db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(id, role, Date.now() + (role === 'admin' ? 12 : 24 * 30) * 3600_000); return id; }
 function cookie(res: Response, name: string, value: string, hours: number) { res.cookie(name, value, { httpOnly: true, sameSite: 'strict', secure: config.publicUrl.startsWith('https:'), maxAge: hours * 3600_000, path: '/' }); }
 export function createApp(printers = new PrinterService()) {
+  const requireSetup = () => { if (!onboarding().completed) throw new AppError(409, '商家尚未完成首次设置，请完成店铺名称、打印机和价格配置。'); };
+  const stationReady = async (force = false) => { await printers.requireReady(force); requireSetup(); };
+  const setupState = async () => {
+    const progress = onboarding(), printer = await printers.state();
+    return { ...progress, settings: settings(), printer, step: !progress.identity ? 0 : !printer.ready ? 1 : !progress.pricing ? 2 : 3 };
+  };
   const app = express(); app.disable('x-powered-by');
   app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('X-Frame-Options', 'SAMEORIGIN'); res.setHeader('Referrer-Policy', 'same-origin'); next(); });
   app.use('/api', noCache, cookieParser(), express.json({ limit: '256kb' }));
@@ -43,8 +49,8 @@ export function createApp(printers = new PrinterService()) {
   });
   app.get('/api/device', async (_req, res) => {
     const printer = await printers.state(), shop = settings();
-    res.json({ id: 'station-1', ...shop, accepting: shop.accepting && printer.ready, printerReady: printer.ready,
-      unavailableReason: !printer.ready ? printer.reason : !shop.accepting ? '打印站暂停接单。' : '', paymentMode: 'mock', printerMode: 'artifact', wordReady: !!sofficePath() });
+    res.json({ id: 'station-1', ...shop, accepting: shop.accepting && printer.ready && onboarding().completed, printerReady: printer.ready,
+      unavailableReason: !printer.ready ? printer.reason : !onboarding().completed ? '商家尚未完成首次设置，请稍后再来。' : !shop.accepting ? '打印站暂停接单。' : '', paymentMode: 'mock', printerMode: 'artifact', wordReady: !!sofficePath() });
   });
   app.get('/api/files', (req, res) => res.json(db.prepare('SELECT * FROM files WHERE owner=? ORDER BY created').all(auth(req).guest).map(row => ({ ...row, owner: undefined }))));
   const upload = multer({ dest: path.join(config.data, 'tmp'), limits: { fileSize: 30 * 1024 * 1024, files: 1, fields: 0 } });
@@ -52,7 +58,7 @@ export function createApp(printers = new PrinterService()) {
     if (!req.file) throw new AppError(400, '请选择文件。');
     const temp = req.file.path;
     try {
-      await printers.requireReady();
+      await stationReady();
       if (!settings().accepting) throw new AppError(409, '打印站暂停接单，请稍后再来。');
       const total = db.prepare("SELECT coalesce(sum(size),0) AS size, count(*) AS n FROM files WHERE owner=? AND status!='expired'").get(auth(req).guest) as { size: number; n: number };
       if (total.size + req.file.size > 200 * 1024 * 1024 || total.n >= 30) throw new AppError(400, '当前文件暂存空间已满，请删除不需要的文件。');
@@ -89,7 +95,7 @@ export function createApp(printers = new PrinterService()) {
     db.prepare('DELETE FROM files WHERE id=?').run(f.id); res.json({ ok: true });
   });
   app.post('/api/quotes', async (req, res) => {
-    await printers.requireReady();
+    await stationReady();
     const shop = settings(); if (!shop.accepting) throw new AppError(409, '打印站暂停接单。');
     const input = optionsSchema.parse(req.body); const files = input.fileIds.map(id => ownedFile(req, id));
     const snapshot = makeSnapshot(input, files, shop); const id = randomUUID();
@@ -101,7 +107,7 @@ export function createApp(printers = new PrinterService()) {
     if (!q) throw new AppError(404, '报价不存在。');
     const previous = db.prepare('SELECT * FROM orders WHERE quote_id=?').get(quoteId) as OrderRow | undefined;
     if (previous) return res.json(presentOrder(previous));
-    await printers.requireReady(true);
+    await stationReady(true);
     // Another checkout may have completed while discovery was running.
     const completed = db.prepare('SELECT * FROM orders WHERE quote_id=?').get(quoteId) as OrderRow | undefined;
     if (completed) return res.json(presentOrder(completed));
@@ -125,7 +131,7 @@ export function createApp(printers = new PrinterService()) {
   app.post('/api/orders/:id/pay', async (req, res) => {
     let o = ownedOrder(req, String(req.params.id));
     if (o.paid) return res.json(presentOrder(o));
-    await printers.requireReady(true);
+    await stationReady(true);
     o = ownedOrder(req, String(req.params.id));
     if (o.paid) return res.json(presentOrder(o));
     if (o.status !== 'awaiting_payment' || o.expires <= Date.now()) throw new AppError(409, '订单已取消或过期，无法支付。');
@@ -138,7 +144,7 @@ export function createApp(printers = new PrinterService()) {
   });
   app.post('/api/orders/:id/cancel', (req, res) => { const o = ownedOrder(req, String(req.params.id)); if (o.status !== 'awaiting_payment') throw new AppError(409, '仅可取消未支付订单。'); db.prepare("UPDATE orders SET status='cancelled' WHERE id=?").run(o.id); event(o.id, '订单已取消'); res.json(presentOrder(getOrder(o.id)!)); });
   app.get('/api/orders/:id/pdf', (req, res) => { const o = ownedOrder(req, String(req.params.id)); if (o.status !== 'ready' || o.expires <= Date.now()) throw new AppError(410, '文件未生成或已经过期。'); res.download(filePath(o.id, 'output'), `纸间-${o.code}.pdf`); });
-  app.get('/api/admin/session', (req, res) => res.json({ authenticated: auth(req).admin }));
+  app.get('/api/admin/session', (req, res) => res.json({ authenticated: auth(req).admin, ...(auth(req).admin ? { setupRequired: !onboarding().completed } : {}) }));
   app.post('/api/admin/login', (req, res) => {
     const password = z.string().max(256).parse(req.body.password);
     const key = req.ip || 'local', now = Date.now();
@@ -149,6 +155,31 @@ export function createApp(printers = new PrinterService()) {
   });
   app.post('/api/admin/logout', (req, res) => { if (typeof req.cookies?.merchant === 'string') db.prepare('DELETE FROM sessions WHERE id=?').run(req.cookies.merchant); res.clearCookie('merchant', { path: '/' }); res.json({ ok: true }); });
   app.use('/api/admin', adminOnly);
+  app.get('/api/admin/onboarding', async (_req, res) => res.json(await setupState()));
+  app.put('/api/admin/onboarding', async (req, res) => {
+    const input = z.discriminatedUnion('action', [
+      z.object({ action: z.literal('identity'), shopName: settingsSchema.shape.shopName, deviceName: settingsSchema.shape.deviceName, address: settingsSchema.shape.address }),
+      z.object({ action: z.literal('printer') }),
+      z.object({ action: z.literal('pricing'), simplexPrice: settingsSchema.shape.simplexPrice, duplexPrice: settingsSchema.shape.duplexPrice }),
+      z.object({ action: z.literal('complete'), accepting: z.boolean() }),
+    ]).parse(req.body);
+    if (onboarding().completed) return res.json(await setupState());
+    if (input.action !== 'identity' && !onboarding().identity) throw new AppError(409, '请先填写店铺名称。');
+    if (input.action !== 'identity') await printers.requireReady(true);
+    transaction(() => {
+      const progress = onboarding(), next = settings();
+      if (progress.completed) return;
+      if (input.action === 'identity') { next.shopName = input.shopName; next.deviceName = input.deviceName; next.address = input.address; progress.identity = true; }
+      if (input.action === 'pricing') { next.simplexPrice = input.simplexPrice; next.duplexPrice = input.duplexPrice; progress.pricing = true; }
+      if (input.action === 'complete') {
+        if (!progress.identity || !progress.pricing) throw new AppError(409, '请先完成店铺名称与价格设置。');
+        settingsSchema.parse(next); next.accepting = input.accepting; progress.completed = true;
+      }
+      db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(next));
+      db.prepare('UPDATE onboarding SET value=? WHERE id=1').run(JSON.stringify(progress));
+    });
+    res.json(await setupState());
+  });
   app.get('/api/admin/printers', async (_req, res) => res.json(await printers.state(true)));
   app.put('/api/admin/printers/default', async (req, res) => {
     const { name } = z.object({ name: z.string().min(1).max(512) }).parse(req.body);
@@ -174,7 +205,7 @@ export function createApp(printers = new PrinterService()) {
   app.get('/api/admin/settings', (_req, res) => res.json(settings()));
   app.put('/api/admin/settings', async (req, res) => {
     const next = settingsSchema.parse(req.body);
-    if (next.accepting && !settings().accepting) await printers.requireReady(true);
+    if (next.accepting && !settings().accepting) await stationReady(true);
     db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(next)); res.json(next);
   });
   app.put('/api/admin/password', (req, res) => {
@@ -186,7 +217,7 @@ export function createApp(printers = new PrinterService()) {
   app.get('/api/admin/device', async (_req, res) => {
     const printer = await printers.state();
     const addresses = Object.values(os.networkInterfaces()).flat().filter(i => i && !i.internal && i.family === 'IPv4').map(i => i!.address);
-    res.json({ mode: 'artifact', printer, accepting: settings().accepting && printer.ready, label: printer.ready ? '默认打印队列已配置 · PDF 测试模式' : '待连接打印机 · 暂停接单', wordReady: !!sofficePath(), fontReady: existsSync(config.font), url: config.publicUrl, addresses, qr: await QRCode.toDataURL(config.publicUrl, { width: 512, margin: 2 }), conversionQueue: Number((db.prepare("SELECT count(*) AS n FROM files WHERE status IN ('queued','processing')").get() as { n: number }).n) });
+    res.json({ mode: 'artifact', printer, accepting: settings().accepting && printer.ready && onboarding().completed, label: printer.ready ? '默认打印队列已配置 · PDF 测试模式' : '待连接打印机 · 暂停接单', wordReady: !!sofficePath(), fontReady: existsSync(config.font), url: config.publicUrl, addresses, qr: await QRCode.toDataURL(config.publicUrl, { width: 512, margin: 2 }), conversionQueue: Number((db.prepare("SELECT count(*) AS n FROM files WHERE status IN ('queued','processing')").get() as { n: number }).n) });
   });
   app.use('/api', (_req, _res, next) => next(new AppError(404, '接口不存在。')));
   if (existsSync(path.resolve('dist'))) { app.use(express.static(path.resolve('dist'))); app.get('/{*path}', (_req, res) => res.sendFile(path.resolve('dist/index.html'))); }

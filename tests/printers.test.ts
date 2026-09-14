@@ -43,6 +43,9 @@ test('scan lists all queues without automatically binding; exact selection persi
   assert.equal(restarted.ready, true); assert.equal(restarted.defaultPrinter?.name, queue.name);
   const relocated = await new PrinterService(discover, 'other-host').state();
   assert.equal(relocated.ready, false); assert.match(relocated.reason, /更换电脑/);
+  await admin.put('/api/admin/onboarding').send({ action: 'identity', shopName: settings().shopName, deviceName: settings().deviceName, address: settings().address }).expect(200);
+  await admin.put('/api/admin/onboarding').send({ action: 'pricing', simplexPrice: 20, duplexPrice: 20 }).expect(200);
+  await admin.put('/api/admin/onboarding').send({ action: 'complete', accepting: true }).expect(200);
   await admin.put('/api/admin/settings').send({ ...settings(), accepting: true }).expect(200);
   assert.equal((await guest.get('/api/device')).body.accepting, true);
 });

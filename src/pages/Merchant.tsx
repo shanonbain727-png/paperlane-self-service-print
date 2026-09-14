@@ -3,6 +3,7 @@ import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom';
 import { LayoutDashboard, ClipboardList, Printer, SlidersHorizontal, Layers, Settings as SettingsIcon, LogOut, ArrowUpRight, Search, Download, ArrowRight, Check, LockKeyhole, FileText, CircleDollarSign, Clock3, CircleAlert, QrCode, Save, Eye, Menu, BookOpen } from 'lucide-react';
 import { api, post, useLoad, money, when, Brand, Alert, Empty, Badge, Loading, Saved, Modal, type Order } from '../lib';
 import { OrderDetail } from './Customer';
+import { OnboardingWizard } from '../OnboardingWizard';
 import { SetupGuide, SetupPrompt } from '../SetupGuide';
 import { PrinterConnection } from '../PrinterConnection';
 import type { PrinterState } from '../../server/printers';
@@ -10,11 +11,12 @@ import type { Device } from '../lib';
 import type { Settings } from '../../server/types';
 const navItems = [{ to: '/merchant/setup', label: '安装与设置', icon: BookOpen }, { to: '/merchant', label: '经营概览', icon: LayoutDashboard }, { to: '/merchant/orders', label: '订单管理', icon: ClipboardList }, { to: '/merchant/prices', label: '价格设置', icon: SlidersHorizontal }, { to: '/merchant/device', label: '设备管理', icon: Printer }, { to: '/merchant/cover', label: '封页设置', icon: Layers }, { to: '/merchant/settings', label: '基础设置', icon: SettingsIcon }];
 export function Merchant() {
-  const { data: session, error, reload } = useLoad(() => api<{ authenticated: boolean }>('/api/admin/session'));
+  const { data: session, error, reload } = useLoad(() => api<{ authenticated: boolean; setupRequired: boolean }>('/api/admin/session'));
   const location = useLocation(), [mobileNav, setMobileNav] = useState(false);
   useEffect(() => setMobileNav(false), [location.pathname]);
   if (!session) return <div className="login-page">{error ? <Alert>{error}</Alert> : <Loading/>}</div>;
   if (!session.authenticated) return <Login onSuccess={reload}/>;
+  if (session.setupRequired) return <OnboardingWizard onComplete={reload}/>;
   const title = navItems.find(n => n.to === location.pathname)?.label || '商家中心';
   return <div className="merchant-shell"><aside className={`merchant-sidebar ${mobileNav ? 'open' : ''}`}><Brand/><div className="sidebar-label">商家工作台</div><nav>{navItems.map(({ to, label, icon: Icon }) => <NavLink end key={to} to={to} className={({ isActive }) => isActive ? 'active' : ''}><Icon size={19}/>{label}</NavLink>)}</nav><div className="sidebar-bottom"><div className="station-card"><span className="status-dot"/><div><strong>单店试点版本</strong><small>PDF 输出 · 测试支付</small></div></div><Link to="/" target="_blank">打开顾客端 <ArrowUpRight size={16}/></Link><button onClick={() => post('/api/admin/logout').then(reload)}><LogOut size={17}/>退出登录</button></div></aside><div className="merchant-body"><header className="merchant-topbar"><div><button className="icon-button mobile-menu" aria-label="展开菜单" onClick={() => setMobileNav(!mobileNav)}><Menu/></button><span>商家中心</span><i>/</i><strong>{title}</strong></div><div><Link className="setup-nav-button" to="/merchant/setup"><BookOpen size={16}/>安装与设置</Link><span className="test-label desktop-only">测试环境</span><span className="avatar">商</span><span className="desktop-only">管理员</span></div></header><main className="merchant-content"><Routes><Route index element={<Overview/>}/><Route path="setup" element={<SetupGuide/>}/><Route path="orders" element={<Orders/>}/><Route path="prices" element={<SettingsForm kind="prices"/>}/><Route path="device" element={<DevicePage/>}/><Route path="cover" element={<SettingsForm kind="cover"/>}/><Route path="settings" element={<SettingsForm kind="settings"/>}/><Route path="*" element={<Empty text="页面不存在" detail="请从左侧菜单选择页面。"/>}/></Routes></main><footer className="merchant-footer">纸间 PAPERLANE <span>单店自助打印管理 · v0.1</span></footer></div></div>;
 }
