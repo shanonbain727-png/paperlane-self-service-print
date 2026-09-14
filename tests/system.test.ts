@@ -17,9 +17,11 @@ const { db, settings } = await import('../server/db.ts');
 const { tick, recover, cleanup } = await import('../server/worker.ts');
 const { filePath, sofficePath } = await import('../server/config.ts');
 const { makeSnapshot } = await import('../server/domain.ts');
-const app = createApp(), guest = request.agent(app), other = request.agent(app), admin = request.agent(app);
+const { PrinterService } = await import('../server/printers.ts');
+const printers = new PrinterService(async () => ({ backend: 'windows', printers: [{ name: '业务测试队列（模拟）', driver: 'Test', connection: 'USB', status: '可用', available: true, virtual: false, systemDefault: false }] }), 'test-host');
+const app = createApp(printers), guest = request.agent(app), other = request.agent(app), admin = request.agent(app);
 let fileId = '', orderId = '', wordId = '', photoId = '';
-before(async () => { await createFixtures('examples'); await guest.get('/api/device').expect(200); await other.get('/api/device').expect(200); await admin.post('/api/admin/login').send({ password: process.env.ADMIN_PASSWORD }).expect(200); });
+before(async () => { await createFixtures('examples'); await guest.get('/api/device').expect(200); await other.get('/api/device').expect(200); await admin.post('/api/admin/login').send({ password: process.env.ADMIN_PASSWORD }).expect(200); await admin.put('/api/admin/printers/default').send({ name: '业务测试队列（模拟）' }).expect(200); });
 after(async () => { await writeFile(path.join(process.env.DATA_DIR!, 'summary.json'), JSON.stringify({ orderId, fileId, wordId, photoId, output: filePath(orderId, 'output'), wordPdf: filePath(wordId, 'converted') }, null, 2)); db.close(); });
 test('merchant endpoints require authentication and reject cross-site writes', async () => {
   await other.get('/api/admin/orders').expect(401);

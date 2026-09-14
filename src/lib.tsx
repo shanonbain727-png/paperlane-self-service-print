@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Printer, ArrowUpRight, LoaderCircle, X, FileText, Check, CircleAlert } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { Settings, Snapshot } from '../server/types';
-export type Device = Settings & { wordReady: boolean; id: string };
+export type Device = Settings & { wordReady: boolean; id: string; printerReady: boolean; unavailableReason: string };
 export type FileItem = { id: string; name: string; size: number; ext: string; status: string; pages: number; error: string | null; expires: number };
 export type Order = { id: string; code: string; status: string; paid: number; created: number; expires: number; snapshot: Snapshot; outputAvailable: boolean; output_pages: number; error: string | null; events?: { action: string; created: number }[] };
 export async function api<T = any>(url: string, init?: RequestInit): Promise<T> {

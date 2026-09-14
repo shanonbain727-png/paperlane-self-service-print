@@ -14,6 +14,7 @@ import { db, settings, transaction, event, checkPassword, hashPassword } from '.
 import { makeSnapshot, optionsSchema, settingsSchema, AppError } from './domain.ts';
 import { mockPayment } from './pdf.ts';
 import type { FileRow, OrderRow, Snapshot } from './types.ts';
+import { PrinterService } from './printers.ts';
 type AuthedRequest = Request & { guest: string; admin: boolean };
 const attempts = new Map<string, { count: number; until: number }>();
 const noCache = (_req: Request, res: Response, next: NextFunction) => { res.setHeader('Cache-Control', 'no-store'); next(); };
@@ -26,7 +27,7 @@ function ownedFile(req: Request, id: string) { const f = getFile(id); if (!f || 
 function ownedOrder(req: Request, id: string) { const o = getOrder(id); if (!o || (!auth(req).admin && o.owner !== auth(req).guest)) throw new AppError(404, '订单不存在或无权访问。'); return o; }
 function session(role: string) { const id = randomBytes(32).toString('hex'); db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(id, role, Date.now() + (role === 'admin' ? 12 : 24 * 30) * 3600_000); return id; }
 function cookie(res: Response, name: string, value: string, hours: number) { res.cookie(name, value, { httpOnly: true, sameSite: 'strict', secure: config.publicUrl.startsWith('https:'), maxAge: hours * 3600_000, path: '/' }); }
-export function createApp() {
+export function createApp(printers = new PrinterService()) {
   const app = express(); app.disable('x-powered-by');
   app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('X-Frame-Options', 'SAMEORIGIN'); res.setHeader('Referrer-Policy', 'same-origin'); next(); });
   app.use('/api', noCache, cookieParser(), express.json({ limit: '256kb' }));
@@ -40,13 +41,18 @@ export function createApp() {
     if (!get(guest, 'guest')) { guest = session('guest'); cookie(res, 'guest', guest, 24 * 30); }
     auth(req).guest = guest; auth(req).admin = !!get(req.cookies?.merchant, 'admin'); next();
   });
-  app.get('/api/device', (_req, res) => res.json({ id: 'station-1', ...settings(), paymentMode: 'mock', printerMode: 'artifact', wordReady: !!sofficePath() }));
+  app.get('/api/device', async (_req, res) => {
+    const printer = await printers.state(), shop = settings();
+    res.json({ id: 'station-1', ...shop, accepting: shop.accepting && printer.ready, printerReady: printer.ready,
+      unavailableReason: !printer.ready ? printer.reason : !shop.accepting ? '打印站暂停接单。' : '', paymentMode: 'mock', printerMode: 'artifact', wordReady: !!sofficePath() });
+  });
   app.get('/api/files', (req, res) => res.json(db.prepare('SELECT * FROM files WHERE owner=? ORDER BY created').all(auth(req).guest).map(row => ({ ...row, owner: undefined }))));
   const upload = multer({ dest: path.join(config.data, 'tmp'), limits: { fileSize: 30 * 1024 * 1024, files: 1, fields: 0 } });
   app.post('/api/files', upload.single('file'), async (req, res) => {
     if (!req.file) throw new AppError(400, '请选择文件。');
     const temp = req.file.path;
     try {
+      await printers.requireReady();
       if (!settings().accepting) throw new AppError(409, '打印站暂停接单，请稍后再来。');
       const total = db.prepare("SELECT coalesce(sum(size),0) AS size, count(*) AS n FROM files WHERE owner=? AND status!='expired'").get(auth(req).guest) as { size: number; n: number };
       if (total.size + req.file.size > 200 * 1024 * 1024 || total.n >= 30) throw new AppError(400, '当前文件暂存空间已满，请删除不需要的文件。');
@@ -82,18 +88,23 @@ export function createApp() {
     await rm(filePath(f.id, 'original', f.ext), { force: true }); await rm(filePath(f.id, 'converted'), { force: true });
     db.prepare('DELETE FROM files WHERE id=?').run(f.id); res.json({ ok: true });
   });
-  app.post('/api/quotes', (req, res) => {
+  app.post('/api/quotes', async (req, res) => {
+    await printers.requireReady();
     const shop = settings(); if (!shop.accepting) throw new AppError(409, '打印站暂停接单。');
     const input = optionsSchema.parse(req.body); const files = input.fileIds.map(id => ownedFile(req, id));
     const snapshot = makeSnapshot(input, files, shop); const id = randomUUID();
     db.prepare('INSERT INTO quotes VALUES(?,?,?,?)').run(id, auth(req).guest, JSON.stringify(snapshot), Date.now()); res.json({ id, ...snapshot });
   });
-  app.post('/api/orders', (req, res) => {
+  app.post('/api/orders', async (req, res) => {
     const quoteId = z.string().uuid().parse(req.body.quoteId);
     const q = db.prepare('SELECT * FROM quotes WHERE id=? AND owner=?').get(quoteId, auth(req).guest) as { snapshot: string; created: number } | undefined;
     if (!q) throw new AppError(404, '报价不存在。');
     const previous = db.prepare('SELECT * FROM orders WHERE quote_id=?').get(quoteId) as OrderRow | undefined;
     if (previous) return res.json(presentOrder(previous));
+    await printers.requireReady(true);
+    // Another checkout may have completed while discovery was running.
+    const completed = db.prepare('SELECT * FROM orders WHERE quote_id=?').get(quoteId) as OrderRow | undefined;
+    if (completed) return res.json(presentOrder(completed));
     if (!settings().accepting) throw new AppError(409, '打印站暂停接单。');
     if (Date.now() - q.created > 15 * 60_000) throw new AppError(409, '报价已过期，请重新确认。');
     const snap: Snapshot = JSON.parse(q.snapshot);
@@ -111,8 +122,11 @@ export function createApp() {
   });
   app.get('/api/orders', (req, res) => res.json((db.prepare('SELECT * FROM orders WHERE owner=? ORDER BY created DESC').all(auth(req).guest) as OrderRow[]).map(presentOrder)));
   app.get('/api/orders/:id', (req, res) => { const o = ownedOrder(req, String(req.params.id)); res.json({ ...presentOrder(o), events: db.prepare('SELECT action,created FROM events WHERE order_id=? ORDER BY id DESC').all(o.id) }); });
-  app.post('/api/orders/:id/pay', (req, res) => {
-    const o = ownedOrder(req, String(req.params.id));
+  app.post('/api/orders/:id/pay', async (req, res) => {
+    let o = ownedOrder(req, String(req.params.id));
+    if (o.paid) return res.json(presentOrder(o));
+    await printers.requireReady(true);
+    o = ownedOrder(req, String(req.params.id));
     if (o.paid) return res.json(presentOrder(o));
     if (o.status !== 'awaiting_payment' || o.expires <= Date.now()) throw new AppError(409, '订单已取消或过期，无法支付。');
     if (!settings().accepting) throw new AppError(409, '打印站暂停接单，暂时不能支付。');
@@ -135,6 +149,12 @@ export function createApp() {
   });
   app.post('/api/admin/logout', (req, res) => { if (typeof req.cookies?.merchant === 'string') db.prepare('DELETE FROM sessions WHERE id=?').run(req.cookies.merchant); res.clearCookie('merchant', { path: '/' }); res.json({ ok: true }); });
   app.use('/api/admin', adminOnly);
+  app.get('/api/admin/printers', async (_req, res) => res.json(await printers.state(true)));
+  app.put('/api/admin/printers/default', async (req, res) => {
+    const { name } = z.object({ name: z.string().min(1).max(512) }).parse(req.body);
+    res.json(await printers.select(name));
+  });
+  app.delete('/api/admin/printers/default', async (_req, res) => { printers.disconnect(); res.json(await printers.state()); });
   app.get('/api/admin/overview', (_req, res) => {
     const orders = db.prepare('SELECT * FROM orders ORDER BY created DESC').all() as OrderRow[];
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
@@ -152,7 +172,11 @@ export function createApp() {
     db.prepare("UPDATE orders SET status='generating',error=NULL WHERE id=?").run(o.id); event(o.id, '商家重试文件生成'); res.json({ ok: true });
   });
   app.get('/api/admin/settings', (_req, res) => res.json(settings()));
-  app.put('/api/admin/settings', (req, res) => { const next = settingsSchema.parse(req.body); db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(next)); res.json(next); });
+  app.put('/api/admin/settings', async (req, res) => {
+    const next = settingsSchema.parse(req.body);
+    if (next.accepting && !settings().accepting) await printers.requireReady(true);
+    db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(next)); res.json(next);
+  });
   app.put('/api/admin/password', (req, res) => {
     const input = z.object({ current: z.string().max(256), next: z.string().min(12).max(128) }).parse(req.body);
     if (!checkPassword(input.current)) throw new AppError(400, '原密码不正确。');
@@ -160,8 +184,9 @@ export function createApp() {
     cookie(res, 'merchant', session('admin'), 12); res.json({ ok: true });
   });
   app.get('/api/admin/device', async (_req, res) => {
+    const printer = await printers.state();
     const addresses = Object.values(os.networkInterfaces()).flat().filter(i => i && !i.internal && i.family === 'IPv4').map(i => i!.address);
-    res.json({ mode: 'artifact', label: '模拟设备 · 尚未连接打印机', wordReady: !!sofficePath(), fontReady: existsSync(config.font), url: config.publicUrl, addresses, qr: await QRCode.toDataURL(config.publicUrl, { width: 512, margin: 2 }), conversionQueue: Number((db.prepare("SELECT count(*) AS n FROM files WHERE status IN ('queued','processing')").get() as { n: number }).n) });
+    res.json({ mode: 'artifact', printer, accepting: settings().accepting && printer.ready, label: printer.ready ? '默认打印队列已配置 · PDF 测试模式' : '待连接打印机 · 暂停接单', wordReady: !!sofficePath(), fontReady: existsSync(config.font), url: config.publicUrl, addresses, qr: await QRCode.toDataURL(config.publicUrl, { width: 512, margin: 2 }), conversionQueue: Number((db.prepare("SELECT count(*) AS n FROM files WHERE status IN ('queued','processing')").get() as { n: number }).n) });
   });
   app.use('/api', (_req, _res, next) => next(new AppError(404, '接口不存在。')));
   if (existsSync(path.resolve('dist'))) { app.use(express.static(path.resolve('dist'))); app.get('/{*path}', (_req, res) => res.sendFile(path.resolve('dist/index.html'))); }

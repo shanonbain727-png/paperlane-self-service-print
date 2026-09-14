@@ -20,3 +20,25 @@
 .file-thumbnail {width:56px;height:62px;object-fit:contain;flex-shrink:0;background:#f1f4ef;border:1px solid #e0e7dc;border-radius:6px;}
 .sr-only {position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}
 @media(max-width:620px){.sortable-row {display:grid;grid-template-columns:26px 12px 46px minmax(0,1fr);gap:8px;}.sortable-row .sort-handle {grid-row:1 / 3;min-height:74px;}.sortable-row .file-thumbnail {width:46px;height:54px;}.sortable-row .file-actions {grid-column:2 / -1;justify-content:flex-end;}.sortable-row .file-info {min-width:0;width:100%;}.sort-help {font-size:11px;}.sortable-row .file-actions .icon-button {width:34px;height:32px;}}
+
+/* Printer discovery and application default */
+.printer-connection{padding:28px;margin-bottom:24px}
+.printer-connection h2{display:flex;align-items:center;gap:9px;margin:8px 0}
+.connection-methods{display:flex;gap:10px;flex-wrap:wrap;margin:20px 0 12px}
+.connection-methods button{display:flex;align-items:center;gap:8px;border:1px solid #dde5df;border-radius:10px;background:#fff;padding:12px 18px;color:#526057}
+.connection-methods button.selected{border-color:#2b6b4b;background:#edf5ef;color:#23583e}
+.connection-help{font-size:13px;line-height:1.8;color:#637167;min-height:24px}
+.printer-default{display:flex;gap:15px;align-items:center;padding:20px;background:#f4f7f3;border-radius:12px;margin:18px 0}
+.printer-default>div{flex:1;min-width:0;display:grid;gap:6px}
+.printer-default strong{overflow-wrap:anywhere}.printer-default small,.printer-default span{font-size:12px;color:#637167}
+.printer-inventory-heading{display:flex;justify-content:space-between;gap:12px;font-size:13px;margin:22px 0 12px}
+.printer-inventory-heading span{color:#637167;overflow-wrap:anywhere}
+.printer-options{border:0;padding:0;margin:0;display:grid;gap:10px;min-width:0}
+.printer-option{display:flex;gap:13px;align-items:center;border:1px solid #e2e8e1;border-radius:10px;padding:16px;cursor:pointer}
+.printer-option.selected{border-color:#377457;background:#f4f9f4}
+.printer-option input{width:17px;height:17px;flex-shrink:0;accent-color:#2b6b4b}
+.printer-option-main{flex:1;min-width:0;display:grid;gap:6px;overflow-wrap:anywhere}
+.printer-option-main strong{font-size:14px}.printer-option-main span,.printer-option-main small{font-size:12px}.printer-option-main span{color:#637167}
+.printer-tags{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.printer-tags span{font-size:11px;background:#edf1eb;border-radius:5px;padding:4px 7px;display:flex;gap:3px;align-items:center}
+.connection-limit{border-top:1px solid #e5eae3;padding-top:17px;margin-top:20px;line-height:1.8}
+@media(max-width:600px){.printer-connection{padding:20px}.printer-connection>.section-heading{align-items:flex-start;gap:12px}.printer-connection>.section-heading>.primary{font-size:12px;padding:10px;white-space:nowrap}.connection-methods{gap:6px}.connection-methods button{font-size:12px;padding:10px}.printer-option{flex-wrap:wrap;padding:12px}.printer-tags{width:100%;justify-content:flex-start;padding-left:30px}.printer-default{padding:14px}.printer-inventory .form-footer{align-items:stretch;flex-direction:column}}

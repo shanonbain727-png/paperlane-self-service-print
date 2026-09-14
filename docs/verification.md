@@ -52,3 +52,16 @@
 ## 当前边界
 
 没有真实微信收款、退款或实体打印执行。没有自动获取微信昵称，也没有收集顾客手机号。当前 PDF 保留源色彩，黑白、长边双面等实体输出设置需以后通过所购打印机验证。公网部署和无人值守硬件故障处理尚未验收。
+
+
+## 2026-09-14 打印机发现与默认选择
+
+- `npm test`：23 项通过（原有 17 项业务测试、新增 6 项打印机测试），含中文 Word 实际转换、多图片次序与自动模拟支付。
+- 新增验证：未配置时后台可访问而顾客上传/报价被拦截；接口鉴权；不存在/离线队列不可选择；读取失败清空可选列表并保留默认配置；更换主机需重新配置；默认解除后既有报价与旧待支付单被拦截；下单前刷新系统状态；并发创建同一订单仍只生成一笔支付。
+- 用隔离数据库和可注入的测试枚举器验证新服务实例能够恢复默认配置。业务测试通过后台接口显式选择模拟队列，不依赖测试电脑是否装有实体打印机。
+- Windows 实机：后台「连接打印机」读取到导出为 WPS PDF、Microsoft XPS Document Writer、Microsoft Print to PDF、Fax 共 4 个真实安装的虚拟队列，全部明确标注不会出纸；系统默认 Microsoft Print to PDF 单独标注。
+- 浏览器实操：选择 Microsoft Print to PDF → 保存 → 刷新后本站默认保留；解除默认 → 接单开关禁用且状态变为暂停。测试结束恢复为未选择，未改动 Windows 默认打印机。
+- `npm run build` 通过。同一监听地址重复启动返回退出码 1 并提示端口被占用，任务处理器只在成功监听后启动。
+- CUPS 已实现 `lpstat` 枚举并通过解析测试，尚未在 Linux/macOS 上实机验收。系统队列可用不证明实体打印机在线或成功出纸。此次未实现打印作业发送，未接入真实支付，未安装实体打印机或更改操作系统打印配置。
+
+接口依据：[Windows Get-Printer](https://learn.microsoft.com/en-us/powershell/module/printmanagement/get-printer?view=windowsserver2022-ps)、[CUPS lpstat](https://www.cups.org/doc/man-lpstat.html)。
